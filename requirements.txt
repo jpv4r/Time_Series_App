@@ -1,0 +1,5 @@
+streamlit
+pandas
+prophet
+sqlite3
+plotly

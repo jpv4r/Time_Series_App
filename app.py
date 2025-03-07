@@ -6,105 +6,108 @@ import datetime
 
 app = Flask(__name__)
 
-# Function to convert week number to a real-world date
-def convert_week_to_date(week, start_year=2022):
-    # Define Week 1 as the first Monday of January in the start_year
-    start_date = datetime.date(start_year, 3, 1)
-    start_date += datetime.timedelta(days=(7 - start_date.weekday()))  # Adjust to Monday
-    delta = datetime.timedelta(weeks=week - 1)
+# Function to convert week number to real-world date (Starting from March 14, 2025)
+def convert_week_to_date(week, start_year=2025):
+    start_date = datetime.date(start_year, 3, 14)  # Fixed start date
+    delta = datetime.timedelta(weeks=week - 1)  # Shift weeks dynamically
     return start_date + delta
 
 # Function to fetch data from the database
 def fetch_data(region_code, category=None):
     conn = sqlite3.connect('food_demand.db')
-    query = f"""
-    SELECT week, num_orders
+    query = """
+    SELECT week, num_orders, category
     FROM orders_data
-    WHERE region_code = '{region_code}'
+    WHERE region_code = ?
     """
+    params = [region_code]
+
     if category:
-        query += f" AND category = '{category}'"
+        query += " AND category = ?"
+        params.append(category)
+
     query += " ORDER BY week"
-    
+
     # Fetch data
-    data = pd.read_sql_query(query, conn)
+    data = pd.read_sql_query(query, conn, params=params)
     conn.close()
 
-    # Convert week to real-world dates
-    data['ds'] = data['week'].apply(lambda x: convert_week_to_date(x))
-    data.rename(columns={'num_orders': 'y'}, inplace=True)
+    # Convert week to actual dates
+    if not data.empty:
+        data['ds'] = data['week'].apply(lambda x: convert_week_to_date(x))
+        data.rename(columns={'num_orders': 'y'}, inplace=True)
+
     return data
 
-# Function to append user data dynamically
+# Function to append user input data dynamically
 def append_user_data(region_code, category, num_orders):
     conn = sqlite3.connect('food_demand.db')
     cursor = conn.cursor()
 
-    # Get the latest date from the database
-    cursor.execute("SELECT MAX(week) FROM orders_data")
-    latest_week = cursor.fetchone()[0]
+    # Get latest recorded week number
+    cursor.execute("SELECT MAX(week) FROM orders_data WHERE region_code = ?", (region_code,))
+    latest_week = cursor.fetchone()[0] or 0
 
-    # Calculate the next week
-    next_week = latest_week + 1 if latest_week else 1
+    # Assign the next week's number dynamically
+    next_week = latest_week + 1
 
-    # Insert the new record
+    # Insert new record
     cursor.execute("""
         INSERT INTO orders_data (week, region_code, category, num_orders)
         VALUES (?, ?, ?, ?)
     """, (next_week, region_code, category, num_orders))
+
     conn.commit()
     conn.close()
 
-# Endpoint for predictions
+# Prediction endpoint
 @app.route('/predict', methods=['POST'])
 def predict():
     try:
-        # Get user inputs
         user_input = request.get_json()
         region_code = user_input['region_code']
-        category = user_input.get('category')  # Optional
-        
+        category = user_input.get('category')  # Optional field
+
         # Fetch relevant data
         data = fetch_data(region_code, category)
         if data.empty:
             return jsonify({'error': 'No data found for the given region and category'}), 404
 
-        # Initialize and fit Prophet model
+        # Initialize and train Prophet model
         model = Prophet()
         model.fit(data)
 
-        # Generate future dates
+        # Generate future dates starting from March 14, 2025
         future = model.make_future_dataframe(periods=10, freq='W')
+        future['ds'] = pd.date_range(start="2025-03-14", periods=10, freq='W')
         forecast = model.predict(future)
 
-        # Extract and format predictions
+        # Extract predictions
         result = forecast[['ds', 'yhat']].tail(10)
         result.rename(columns={'ds': 'week', 'yhat': 'predicted_orders'}, inplace=True)
-        result['week'] = result['week'].dt.strftime('%Y-%m-%d')  # Format week for readability
+        result['week'] = result['week'].dt.strftime('%Y-%m-%d')  # Formatting
 
-        # Return predictions as JSON
         return jsonify(result.to_dict(orient='records'))
-    
+
     except Exception as e:
         return jsonify({'error': str(e)}), 500
 
-# Endpoint for adding user data
+# User data insertion endpoint
 @app.route('/add_data', methods=['POST'])
 def add_data():
     try:
-        # Get user inputs
         user_input = request.get_json()
         region_code = user_input['region_code']
         category = user_input['category']
         num_orders = user_input['num_orders']
 
-        # Append the data
+        # Append the user data
         append_user_data(region_code, category, num_orders)
         return jsonify({'message': 'Data added successfully!'})
 
     except Exception as e:
         return jsonify({'error': str(e)}), 500
 
-# Main app
+# Run Flask app
 if __name__ == '__main__':
     app.run(debug=True)
